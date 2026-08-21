@@ -1,0 +1,147 @@
+from typing import NoReturn
+
+import pytest
+from pydantic_ai.exceptions import ModelHTTPError
+from typer.testing import CliRunner
+
+from qwen_harness.cli import app
+from qwen_harness.harness import HarnessConfigurationError, HarnessTimeoutError
+
+
+runner = CliRunner()
+
+
+class StubHarness:
+    def __init__(self, output: str = "Qwen says hello") -> None:
+        self.output = output
+        self.prompts: list[str] = []
+
+    def chat(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return self.output
+
+
+def test_chat_command_prints_agent_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = StubHarness()
+    monkeypatch.setattr("qwen_harness.cli.build_harness", lambda: harness)
+
+    result = runner.invoke(app, ["chat", "Hello"])
+
+    assert result.exit_code == 0
+    assert harness.prompts == ["Hello"]
+    assert "Qwen says hello" in result.output
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (
+            HarnessConfigurationError("invalid harness configuration"),
+            "invalid harness configuration",
+        ),
+        (ConnectionError("cannot connect to Ollama"), "cannot connect to Ollama"),
+        (HarnessTimeoutError("agent timed out"), "agent timed out"),
+    ],
+)
+def test_chat_command_reports_expected_startup_errors_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    message: str,
+) -> None:
+    def fail_to_build() -> NoReturn:
+        raise error
+
+    monkeypatch.setattr("qwen_harness.cli.build_harness", fail_to_build)
+
+    result = runner.invoke(app, ["chat", "Hello"])
+
+    assert result.exit_code != 0
+    assert message in result.output
+    assert "Traceback" not in result.output
+
+
+def test_chat_command_does_not_hide_unexpected_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_to_build() -> NoReturn:
+        raise RuntimeError("programming defect")
+
+    monkeypatch.setattr("qwen_harness.cli.build_harness", fail_to_build)
+
+    result = runner.invoke(app, ["chat", "Hello"])
+
+    assert isinstance(result.exception, RuntimeError)
+
+
+def test_chat_command_explains_ollama_model_runner_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = ModelHTTPError(
+        status_code=500,
+        model_name="qwen3.5:4b",
+        body={
+            "message": (
+                "llama-server process has terminated: exit status 0xe06d7363: "
+                "NTSTATUS 0xe06d7363"
+            )
+        },
+    )
+
+    class CrashingHarness:
+        def chat(self, prompt: str) -> NoReturn:
+            raise error
+
+    monkeypatch.setattr("qwen_harness.cli.build_harness", CrashingHarness)
+
+    result = runner.invoke(app, ["chat", "Hello"])
+
+    assert result.exit_code != 0
+    assert "Ollama's model runner crashed" in result.output
+    assert "CPU-only" in result.output
+    assert "Ollama logs" in result.output
+    assert "status_code: 500" in result.output
+    assert "NTSTATUS 0xe06d7363" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_chat_command_does_not_label_an_unrelated_http_500_as_runner_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = ModelHTTPError(
+        status_code=500,
+        model_name="qwen3.5:4b",
+        body={"message": "internal server error"},
+    )
+
+    class FailingHarness:
+        def chat(self, prompt: str) -> NoReturn:
+            raise error
+
+    monkeypatch.setattr("qwen_harness.cli.build_harness", FailingHarness)
+
+    result = runner.invoke(app, ["chat", "Hello"])
+
+    assert result.exit_code != 0
+    assert "internal server error" in result.output
+    assert "model runner crashed" not in result.output
+    assert "Traceback" not in result.output
+
+
+def test_openai_client_disables_hidden_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_client(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("openai.AsyncOpenAI", fake_client)
+
+    from qwen_harness.cli import build_openai_client
+    from qwen_harness.config import Settings
+
+    build_openai_client(Settings(timeout_seconds=17))
+
+    assert captured["max_retries"] == 0
+    assert captured["timeout"] == 17
