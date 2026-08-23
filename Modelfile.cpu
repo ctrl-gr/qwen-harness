@@ -1,4 +1,4 @@
-FROM qwen3.5:4b
+FROM qwen3.5:0.8b
 
 # The MX230 becomes unstable during CUDA offload. Keep this harness on CPU.
 PARAMETER num_gpu 0

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from qwen_harness.config import Settings
@@ -16,7 +18,7 @@ def test_settings_use_local_qwen_defaults(monkeypatch: pytest.MonkeyPatch) -> No
     settings = Settings()
 
     assert settings.ollama_base_url == "http://localhost:11434/v1"
-    assert settings.model == "qwen3.5:4b-cpu"
+    assert settings.model == "qwen3.5:0.8b-cpu"
     assert settings.max_steps > 0
     assert settings.timeout_seconds > 0
     assert settings.max_output_tokens == 512
@@ -36,6 +38,21 @@ def test_settings_read_ollama_environment(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.max_steps == 3
     assert settings.timeout_seconds == 15
     assert settings.max_output_tokens == 128
+
+
+def test_cpu_modelfile_uses_lightweight_qwen_with_cpu_only_limits() -> None:
+    modelfile = (Path(__file__).parents[1] / "Modelfile.cpu").read_text(
+        encoding="utf-8"
+    )
+    directives = {
+        line.strip()
+        for line in modelfile.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert "FROM qwen3.5:0.8b" in directives
+    assert "PARAMETER num_gpu 0" in directives
+    assert "PARAMETER num_ctx 2048" in directives
 
 
 @pytest.mark.parametrize(

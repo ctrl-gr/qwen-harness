@@ -18,7 +18,7 @@ class Settings(BaseSettings):
         min_length=1,
     )
     model: str = Field(
-        default="qwen3.5:4b-cpu",
+        default="qwen3.5:0.8b-cpu",
         validation_alias="OLLAMA_MODEL",
         min_length=1,
     )

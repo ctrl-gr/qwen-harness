@@ -1,11 +1,15 @@
 from typing import NoReturn
 
 import pytest
-from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior
 from typer.testing import CliRunner
 
 from qwen_harness.cli import app
-from qwen_harness.harness import HarnessConfigurationError, HarnessTimeoutError
+from qwen_harness.harness import (
+    HarnessConfigurationError,
+    HarnessExecutionError,
+    HarnessTimeoutError,
+)
 
 
 runner = CliRunner()
@@ -71,6 +75,51 @@ def test_chat_command_does_not_hide_unexpected_errors(
     result = runner.invoke(app, ["chat", "Hello"])
 
     assert isinstance(result.exception, RuntimeError)
+
+
+def _execution_error_caused_by(cause: Exception) -> HarnessExecutionError:
+    error = HarnessExecutionError(str(cause))
+    error.__cause__ = cause
+    return error
+
+
+def test_chat_command_reports_wrapped_model_format_failure_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cause = UnexpectedModelBehavior(
+        "model output did not match the decision schema"
+    )
+    error = _execution_error_caused_by(cause)
+
+    class InvalidOutputHarness:
+        def chat(self, prompt: str) -> NoReturn:
+            raise error
+
+    monkeypatch.setattr("qwen_harness.cli.build_harness", InvalidOutputHarness)
+
+    result = runner.invoke(app, ["chat", "Hello"])
+
+    assert result.exit_code != 0
+    assert "did not match the decision schema" in result.output
+    assert "Traceback" not in result.output
+    assert result.exception is not error
+
+
+def test_chat_command_does_not_hide_wrapped_programming_defect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = _execution_error_caused_by(RuntimeError("programming defect"))
+
+    class DefectiveHarness:
+        def chat(self, prompt: str) -> NoReturn:
+            raise error
+
+    monkeypatch.setattr("qwen_harness.cli.build_harness", DefectiveHarness)
+
+    result = runner.invoke(app, ["chat", "Hello"])
+
+    assert result.exception is error
+    assert "Error:" not in result.output
 
 
 def test_chat_command_explains_ollama_model_runner_crash(

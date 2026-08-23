@@ -7,7 +7,14 @@ import typer
 from pydantic import ValidationError
 
 from qwen_harness.config import Settings
-from qwen_harness.harness import Harness, HarnessConfigurationError, HarnessError
+from qwen_harness.harness import (
+    Harness,
+    HarnessConfigurationError,
+    HarnessExecutionError,
+    HarnessTimeoutError,
+    InvalidModelDecisionError,
+    InvalidPromptError,
+)
 
 
 app = typer.Typer(
@@ -69,15 +76,42 @@ def _fail(message: str) -> NoReturn:
 
 
 def _is_expected_runtime_error(exc: Exception) -> bool:
-    if isinstance(exc, (HarnessError, ValidationError, ConnectionError, httpx.HTTPError)):
+    if isinstance(exc, HarnessExecutionError):
+        cause = exc.__cause__
+        return isinstance(cause, Exception) and _is_expected_runtime_error(cause)
+
+    if isinstance(
+        exc,
+        (
+            HarnessConfigurationError,
+            HarnessTimeoutError,
+            InvalidModelDecisionError,
+            InvalidPromptError,
+            ValidationError,
+            ConnectionError,
+            httpx.HTTPError,
+        ),
+    ):
         return True
 
     from openai import APIConnectionError, APITimeoutError
-    from pydantic_ai.exceptions import ModelAPIError, UsageLimitExceeded, UserError
+    from pydantic_ai.exceptions import (
+        ModelAPIError,
+        UnexpectedModelBehavior,
+        UsageLimitExceeded,
+        UserError,
+    )
 
     return isinstance(
         exc,
-        (APIConnectionError, APITimeoutError, ModelAPIError, UsageLimitExceeded, UserError),
+        (
+            APIConnectionError,
+            APITimeoutError,
+            ModelAPIError,
+            UnexpectedModelBehavior,
+            UsageLimitExceeded,
+            UserError,
+        ),
     )
 
 

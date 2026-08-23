@@ -38,6 +38,7 @@ def test_harness_passes_prompt_to_injected_agent_and_returns_output() -> None:
     assert agent.calls[0][0] == "Hello, Qwen"
     model_settings = agent.calls[0][1]["model_settings"]
     assert model_settings["thinking"] is False
+    assert model_settings["extra_body"] == {"reasoning_effort": "none"}
     assert model_settings["max_tokens"] == 128
     assert model_settings["timeout"] == 20
     assert agent.calls[0][1]["usage_limits"].request_limit == 4
