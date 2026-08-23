@@ -36,6 +36,22 @@ The final response remains on stdout, so it can still be redirected or piped.
 Event sinks must return promptly; they are best-effort diagnostics, and sink
 exceptions are isolated so logging cannot change a run's outcome.
 
+## Read-only workspace tools
+
+The agent can list files, read bounded UTF-8 text files, and search text under
+the directory where `qwen-harness` is launched. Tool paths must be relative;
+absolute paths, parent traversal, and symlink or junction escapes are rejected.
+There are currently no tools that modify or delete files.
+
+This phase assumes the local workspace is not being maliciously rewritten while
+a tool call is in progress. Handle-level protection against concurrent path
+replacement belongs to the later isolated-sandbox phase; the current harness
+has no mutation tool that can create that race itself.
+
+Future mutation tools follow a backup-first policy: generate and review the
+proposed change, create a recoverable backup or reversible patch, verify that
+recovery artifact, and only then apply an approved modification.
+
 Configuration is read from environment variables:
 
 | Variable | Default | Purpose |
@@ -45,6 +61,15 @@ Configuration is read from environment variables:
 | `HARNESS_MAX_STEPS` | `4` | Maximum model requests per run |
 | `HARNESS_TIMEOUT_SECONDS` | `120` | HTTP timeout per request |
 | `HARNESS_MAX_OUTPUT_TOKENS` | `512` | Maximum generated tokens per response |
+| `HARNESS_MAX_TOOL_CALLS` | `4` | Maximum tool calls per run |
+| `HARNESS_MAX_LIST_ENTRIES` | `200` | Maximum entries returned by one listing |
+| `HARNESS_MAX_FILE_BYTES` | `4000` | Maximum bytes read from one text file |
+| `HARNESS_MAX_SEARCH_RESULTS` | `8` | Maximum matches returned by one search |
+| `HARNESS_MAX_SEARCH_FILES` | `500` | Maximum files visited by one search |
+| `HARNESS_MAX_SEARCH_BYTES` | `1000000` | Aggregate bytes examined by one search |
+| `HARNESS_MAX_LINE_CHARACTERS` | `200` | Maximum characters returned per matching line |
+| `HARNESS_MAX_SEARCH_DIRECTORIES` | `200` | Maximum directories visited by one search |
+| `HARNESS_TOOL_TIMEOUT_SECONDS` | `5` | Wall-clock budget for one filesystem tool |
 
 Thinking is disabled by default to keep latency practical on CPU-heavy machines.
 The included `Modelfile.cpu` also disables GPU offload because the MX230's CUDA

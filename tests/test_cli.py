@@ -70,6 +70,23 @@ def test_verbose_chat_logs_run_boundaries_to_stderr_only(
                     {"from_state": "created", "to_state": "building_context"},
                 ),
                 ("model.call.started", {}),
+                (
+                    "tool.call.started",
+                    {
+                        "tool_name": "read_file",
+                        "risk": "read",
+                        "tool_call_id": "tool-call-123",
+                    },
+                ),
+                (
+                    "tool.call.completed",
+                    {
+                        "tool_name": "read_file",
+                        "risk": "read",
+                        "tool_call_id": "tool-call-123",
+                        "elapsed_seconds": 0.1,
+                    },
+                ),
                 ("model.call.completed", {"elapsed_seconds": 0.25}),
                 ("verification.started", {}),
                 ("verification.completed", {}),
@@ -104,6 +121,8 @@ def test_verbose_chat_logs_run_boundaries_to_stderr_only(
     assert run_id in result.stderr
     assert "created -> building_context" in result.stderr
     assert "model.call.started" in result.stderr
+    assert "read_file" in result.stderr
+    assert "tool-call-123" in result.stderr
     assert "verification.started" in result.stderr
     assert "verifying -> succeeded" in result.stderr
     assert "elapsed=" in result.stderr

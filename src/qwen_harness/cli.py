@@ -1,5 +1,6 @@
 """Command-line entry point."""
 
+from pathlib import Path
 from typing import Any, NoReturn
 
 import httpx
@@ -17,6 +18,7 @@ from qwen_harness.harness import (
     InvalidPromptError,
 )
 from qwen_harness.orchestration import RunEvent
+from qwen_harness.tools import WorkspaceToolRegistry
 
 
 app = typer.Typer(
@@ -43,7 +45,11 @@ def build_openai_client(settings: Settings) -> Any:
     )
 
 
-def build_harness(*, event_sink: EventSink | None = None) -> Harness:
+def build_harness(
+    *,
+    event_sink: EventSink | None = None,
+    workspace_root: Path | None = None,
+) -> Harness:
     """Build the production harness from environment-backed settings."""
     from pydantic_ai import Agent
     from pydantic_ai.models.ollama import OllamaModel
@@ -56,20 +62,36 @@ def build_harness(*, event_sink: EventSink | None = None) -> Harness:
 
     provider = OllamaProvider(openai_client=build_openai_client(settings))
     model = OllamaModel(settings.model, provider=provider)
+    workspace_tools = WorkspaceToolRegistry(
+        workspace_root or Path.cwd(),
+        max_list_entries=settings.max_list_entries,
+        max_file_bytes=settings.max_file_bytes,
+        max_search_results=settings.max_search_results,
+        max_search_files=settings.max_search_files,
+        max_search_bytes=settings.max_search_bytes,
+        max_line_characters=settings.max_line_characters,
+        max_search_directories=settings.max_search_directories,
+        tool_timeout_seconds=settings.tool_timeout_seconds,
+        event_sink=event_sink,
+    )
     agent = Agent(
         model,
         instructions=(
-            "You are a careful local assistant. Follow the user's request, "
-            "state uncertainty plainly, and do not claim to have used tools "
-            "that were not provided."
+            "You are a careful local software assistant. Follow the user's "
+            "request and state uncertainty plainly. You may inspect only the "
+            "configured workspace using the provided read-only tools. Never "
+            "claim to have modified a file."
         ),
+        tools=list(workspace_tools.pydantic_ai_tools),
     )
     return Harness(
         agent=agent,
         max_steps=settings.max_steps,
         timeout_seconds=settings.timeout_seconds,
         max_output_tokens=settings.max_output_tokens,
+        max_tool_calls=settings.max_tool_calls,
         event_sink=event_sink,
+        workspace_root=workspace_tools.workspace_root,
     )
 
 
@@ -150,6 +172,13 @@ def _render_verbose_event(event: RunEvent) -> None:
         detail = f"{event.data['from_state']} -> {event.data['to_state']}"
     else:
         detail = event.name
+
+    tool_name = event.data.get("tool_name")
+    tool_call_id = event.data.get("tool_call_id")
+    if tool_name:
+        detail = f"{detail} tool={tool_name}"
+    if tool_call_id:
+        detail = f"{detail} call={tool_call_id}"
 
     elapsed = event.data.get("elapsed_seconds")
     if isinstance(elapsed, (int, float)):

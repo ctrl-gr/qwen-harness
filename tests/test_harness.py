@@ -44,6 +44,22 @@ def test_harness_passes_prompt_to_injected_agent_and_returns_output() -> None:
     assert agent.calls[0][1]["usage_limits"].request_limit == 4
 
 
+def test_harness_passes_an_explicit_tool_call_limit_to_the_agent() -> None:
+    agent = RecordingAgent(output="local response")
+    harness = Harness(
+        agent=agent,
+        max_steps=4,
+        max_tool_calls=3,
+        timeout_seconds=20,
+        max_output_tokens=128,
+    )
+
+    harness.chat("Inspect the workspace")
+
+    assert agent.calls[0][1]["usage_limits"].tool_calls_limit == 3
+    assert harness.max_tool_calls == 3
+
+
 def test_harness_exposes_its_execution_bounds() -> None:
     harness = Harness(
         agent=RecordingAgent(output="unused"),

@@ -1,10 +1,13 @@
 from dataclasses import dataclass
 from datetime import timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic_ai import ModelRetry
 
 from qwen_harness.harness import Harness, HarnessExecutionError
+from qwen_harness.tools import WorkspaceToolRegistry
 
 
 @dataclass
@@ -171,3 +174,75 @@ def test_event_sink_failure_does_not_replace_the_original_run_failure() -> None:
     assert isinstance(captured.value.__cause__, ConnectionError)
     assert SENSITIVE_ERROR in str(captured.value)
     assert "logging backend failed" not in str(captured.value)
+
+
+def test_successful_tool_call_emits_sanitized_started_and_completed_events(
+    tmp_path: Path,
+) -> None:
+    sensitive_content = "TOP-SECRET file content"
+    sensitive_path = "TOP-SECRET-name.txt"
+    (tmp_path / sensitive_path).write_text(sensitive_content, encoding="utf-8")
+    events: list[Any] = []
+    registry = WorkspaceToolRegistry(tmp_path, event_sink=events.append)
+
+    result = registry.read_file(sensitive_path)
+
+    assert result.content == sensitive_content
+    assert [event.name for event in events] == [
+        "tool.call.started",
+        "tool.call.completed",
+    ]
+    assert events[0].data["tool_name"] == "read_file"
+    assert events[0].data["risk"] == "read"
+    tool_call_id = events[0].data["tool_call_id"]
+    assert tool_call_id
+    assert events[1].data["tool_call_id"] == tool_call_id
+    assert events[0].run_id == events[1].run_id
+    assert events[1].data["tool_name"] == "read_file"
+    assert events[1].data["risk"] == "read"
+    assert events[1].data["elapsed_seconds"] >= 0
+    serialized = repr(events)
+    assert sensitive_path not in serialized
+    assert sensitive_content not in serialized
+    assert "arguments" not in serialized
+
+
+def test_failed_tool_call_emits_a_sanitized_failure_event(
+    tmp_path: Path,
+) -> None:
+    events: list[Any] = []
+    registry = WorkspaceToolRegistry(tmp_path, event_sink=events.append)
+
+    with pytest.raises(ModelRetry):
+        registry.read_file("../TOP-SECRET-outside.txt")
+
+    assert [event.name for event in events] == [
+        "tool.call.started",
+        "tool.call.failed",
+    ]
+    failure = events[-1]
+    assert failure.data["tool_name"] == "read_file"
+    assert failure.data["risk"] == "read"
+    assert failure.data["tool_call_id"] == events[0].data["tool_call_id"]
+    assert failure.data["tool_call_id"]
+    assert failure.run_id == events[0].run_id
+    assert failure.data["elapsed_seconds"] >= 0
+    assert failure.data["error_category"] == "workspace_tool_error"
+    serialized = repr(failure)
+    assert "TOP-SECRET" not in serialized
+    assert "outside.txt" not in serialized
+    assert "arguments" not in serialized
+
+
+def test_separate_tool_invocations_have_unique_call_ids(tmp_path: Path) -> None:
+    (tmp_path / "one.txt").write_bytes(b"one")
+    (tmp_path / "two.txt").write_bytes(b"two")
+    events: list[Any] = []
+    registry = WorkspaceToolRegistry(tmp_path, event_sink=events.append)
+
+    registry.read_file("one.txt")
+    registry.read_file("two.txt")
+
+    started = [event for event in events if event.name == "tool.call.started"]
+    assert len(started) == 2
+    assert started[0].data["tool_call_id"] != started[1].data["tool_call_id"]

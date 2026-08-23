@@ -3,6 +3,7 @@
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from time import perf_counter
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol
@@ -17,6 +18,10 @@ from qwen_harness.orchestration import (
     RunLifecycle,
     RunState,
     TransitionEvent,
+)
+from qwen_harness.observability import (
+    bind_run_event_emitter,
+    reset_run_event_emitter,
 )
 
 
@@ -86,7 +91,9 @@ class Harness:
     max_steps: int
     timeout_seconds: float
     max_output_tokens: int
+    max_tool_calls: int = 4
     event_sink: EventSink | None = None
+    workspace_root: Path | None = None
 
     def __post_init__(self) -> None:
         if self.max_steps <= 0:
@@ -95,6 +102,8 @@ class Harness:
             raise ValueError("timeout_seconds must be greater than zero")
         if self.max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be greater than zero")
+        if self.max_tool_calls <= 0:
+            raise ValueError("max_tool_calls must be greater than zero")
 
     def chat(self, prompt: str) -> str:
         """Return one assistant response for a non-empty user prompt."""
@@ -162,6 +171,7 @@ class Harness:
                 "max_model_calls": self.max_steps,
                 "timeout_seconds": self.timeout_seconds,
                 "max_output_tokens": self.max_output_tokens,
+                "max_tool_calls": self.max_tool_calls,
             },
         )
         transition(RunState.BUILDING_CONTEXT)
@@ -173,7 +183,10 @@ class Harness:
             # Phase 1 has only one legal action. Let the small model generate
             # plain content and let Python construct the terminal decision.
             output_type=str,
-            usage_limits=UsageLimits(request_limit=self.max_steps),
+            usage_limits=UsageLimits(
+                request_limit=self.max_steps,
+                tool_calls_limit=self.max_tool_calls,
+            ),
             model_settings=ModelSettings(
                 timeout=self.timeout_seconds,
                 max_tokens=self.max_output_tokens,
@@ -181,6 +194,7 @@ class Harness:
                 extra_body={"reasoning_effort": "none"},
             ),
         )
+        emitter_token = bind_run_event_emitter(emit)
         try:
             result = await asyncio.wait_for(run, timeout=self.timeout_seconds)
         except asyncio.TimeoutError as exc:
@@ -207,6 +221,8 @@ class Harness:
             else:
                 emit_failure("model_error", "The model call failed.")
             raise HarnessExecutionError(str(exc), lifecycle) from exc
+        finally:
+            reset_run_event_emitter(emitter_token)
 
         emit(
             "model.call.completed",
