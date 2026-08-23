@@ -23,6 +23,19 @@ ollama create qwen3.5:0.8b-cpu -f .\Modelfile.cpu
 qwen-harness chat "Explain dependency injection in one paragraph."
 ```
 
+Add `--verbose` (or `-v`) to follow the observable execution on stderr:
+
+```powershell
+qwen-harness chat --verbose "Explain dependency injection in one paragraph."
+```
+
+Verbose events include a run ID, UTC timestamps, state transitions, model and
+verification boundaries, errors, and elapsed time. They intentionally exclude
+prompts, generated content, credentials, and private model chain-of-thought.
+The final response remains on stdout, so it can still be redirected or piped.
+Event sinks must return promptly; they are best-effort diagnostics, and sink
+exceptions are isolated so logging cannot change a run's outcome.
+
 Configuration is read from environment variables:
 
 | Variable | Default | Purpose |

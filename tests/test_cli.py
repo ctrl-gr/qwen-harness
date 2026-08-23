@@ -1,4 +1,6 @@
-from typing import NoReturn
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from typing import Any, Callable, NoReturn
 
 import pytest
 from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior
@@ -9,6 +11,7 @@ from qwen_harness.harness import (
     HarnessConfigurationError,
     HarnessExecutionError,
     HarnessTimeoutError,
+    InvalidModelDecisionError,
 )
 
 
@@ -34,6 +37,161 @@ def test_chat_command_prints_agent_output(monkeypatch: pytest.MonkeyPatch) -> No
     assert result.exit_code == 0
     assert harness.prompts == ["Hello"]
     assert "Qwen says hello" in result.output
+
+
+def test_chat_command_is_quiet_without_verbose_logging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = StubHarness()
+    monkeypatch.setattr("qwen_harness.cli.build_harness", lambda: harness)
+
+    result = runner.invoke(app, ["chat", "Hello"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "Qwen says hello\n"
+    assert result.stderr == ""
+
+
+def test_verbose_chat_logs_run_boundaries_to_stderr_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "run-test-123"
+
+    class VerboseHarness:
+        def __init__(self, event_sink: Callable[[Any], None]) -> None:
+            self.event_sink = event_sink
+
+        def chat(self, prompt: str) -> str:
+            timestamp = datetime(2026, 8, 23, 10, 0, tzinfo=timezone.utc)
+            for name, data in [
+                ("run.started", {}),
+                (
+                    "state.transition",
+                    {"from_state": "created", "to_state": "building_context"},
+                ),
+                ("model.call.started", {}),
+                ("model.call.completed", {"elapsed_seconds": 0.25}),
+                ("verification.started", {}),
+                ("verification.completed", {}),
+                (
+                    "state.transition",
+                    {"from_state": "verifying", "to_state": "succeeded"},
+                ),
+                ("run.completed", {"elapsed_seconds": 0.5}),
+            ]:
+                self.event_sink(
+                    SimpleNamespace(
+                        run_id=run_id,
+                        timestamp=timestamp,
+                        name=name,
+                        data=data,
+                    )
+                )
+            return "Qwen says hello"
+
+    def build_verbose_harness(
+        *, event_sink: Callable[[Any], None] | None = None
+    ) -> VerboseHarness:
+        assert event_sink is not None
+        return VerboseHarness(event_sink)
+
+    monkeypatch.setattr("qwen_harness.cli.build_harness", build_verbose_harness)
+
+    result = runner.invoke(app, ["chat", "--verbose", "Hello"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "Qwen says hello\n"
+    assert run_id in result.stderr
+    assert "created -> building_context" in result.stderr
+    assert "model.call.started" in result.stderr
+    assert "verification.started" in result.stderr
+    assert "verifying -> succeeded" in result.stderr
+    assert "elapsed=" in result.stderr
+    assert "run.completed" in result.stderr
+
+
+def test_verbose_failure_redacts_raw_exception_text_from_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sensitive_error = (
+        "connection failed\n"
+        "Authorization: Bearer super-secret-token\x1b[31m"
+    )
+
+    class VerboseFailingHarness:
+        def __init__(self, event_sink: Callable[[Any], None]) -> None:
+            self.event_sink = event_sink
+
+        def chat(self, prompt: str) -> NoReturn:
+            self.event_sink(
+                SimpleNamespace(
+                    run_id="run-failed-123",
+                    timestamp=datetime(
+                        2026, 8, 23, 10, 0, tzinfo=timezone.utc
+                    ),
+                    name="run.failed",
+                    data={
+                        "error_category": "connection_error",
+                        "message": "The model service is unavailable.",
+                        "elapsed_seconds": 0.1,
+                    },
+                )
+            )
+            raise _execution_error_caused_by(ConnectionError(sensitive_error))
+
+    def build_failing_harness(
+        *, event_sink: Callable[[Any], None] | None = None
+    ) -> VerboseFailingHarness:
+        assert event_sink is not None
+        return VerboseFailingHarness(event_sink)
+
+    monkeypatch.setattr("qwen_harness.cli.build_harness", build_failing_harness)
+
+    result = runner.invoke(app, ["chat", "--verbose", "Hello"])
+
+    assert result.exit_code != 0
+    assert result.stdout == ""
+    assert "connection_error" in result.stderr
+    assert "The model service is unavailable." in result.stderr
+    assert "super-secret-token" not in result.stderr
+    assert "Authorization" not in result.stderr
+    assert "\x1b" not in result.stderr
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_invalid_model_decision_uses_a_fixed_safe_cli_message(
+    monkeypatch: pytest.MonkeyPatch,
+    verbose: bool,
+) -> None:
+    sensitive_error = (
+        "invalid response: /think private reasoning\n"
+        "Authorization: Bearer super-secret-token\x1b[31m"
+    )
+
+    class InvalidDecisionHarness:
+        def chat(self, prompt: str) -> NoReturn:
+            raise InvalidModelDecisionError(sensitive_error)
+
+    def build_invalid_harness(
+        *, event_sink: Callable[[Any], None] | None = None
+    ) -> InvalidDecisionHarness:
+        return InvalidDecisionHarness()
+
+    monkeypatch.setattr("qwen_harness.cli.build_harness", build_invalid_harness)
+    arguments = ["chat"]
+    if verbose:
+        arguments.append("--verbose")
+    arguments.append("Hello")
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code != 0
+    assert result.stdout == ""
+    assert "Error: The model returned an invalid response." in result.stderr
+    assert "private reasoning" not in result.stderr
+    assert "super-secret-token" not in result.stderr
+    assert "Authorization" not in result.stderr
+    assert "\x1b" not in result.stderr
 
 
 @pytest.mark.parametrize(

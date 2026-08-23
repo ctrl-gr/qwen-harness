@@ -12,9 +12,11 @@ from qwen_harness.harness import (
     HarnessConfigurationError,
     HarnessExecutionError,
     HarnessTimeoutError,
+    EventSink,
     InvalidModelDecisionError,
     InvalidPromptError,
 )
+from qwen_harness.orchestration import RunEvent
 
 
 app = typer.Typer(
@@ -41,7 +43,7 @@ def build_openai_client(settings: Settings) -> Any:
     )
 
 
-def build_harness() -> Harness:
+def build_harness(*, event_sink: EventSink | None = None) -> Harness:
     """Build the production harness from environment-backed settings."""
     from pydantic_ai import Agent
     from pydantic_ai.models.ollama import OllamaModel
@@ -67,6 +69,7 @@ def build_harness() -> Harness:
         max_steps=settings.max_steps,
         timeout_seconds=settings.timeout_seconds,
         max_output_tokens=settings.max_output_tokens,
+        event_sink=event_sink,
     )
 
 
@@ -116,6 +119,20 @@ def _is_expected_runtime_error(exc: Exception) -> bool:
 
 
 def _expected_error_message(exc: Exception) -> str:
+    if isinstance(exc, InvalidModelDecisionError):
+        return "The model returned an invalid response."
+
+    if isinstance(exc, HarnessExecutionError):
+        cause = exc.__cause__
+        if isinstance(cause, ConnectionError):
+            return "The model service is unavailable."
+
+        from pydantic_ai.exceptions import UnexpectedModelBehavior
+
+        if isinstance(cause, UnexpectedModelBehavior):
+            return "model output did not match the decision schema"
+        return "The model call failed."
+
     original = str(exc)
     if "llama-server process has terminated" in original.lower():
         return (
@@ -126,11 +143,48 @@ def _expected_error_message(exc: Exception) -> str:
     return original
 
 
+def _render_verbose_event(event: RunEvent) -> None:
+    """Render one sanitized event without mixing logs into the answer stream."""
+    timestamp = event.timestamp.isoformat(timespec="milliseconds")
+    if event.name == "state.transition":
+        detail = f"{event.data['from_state']} -> {event.data['to_state']}"
+    else:
+        detail = event.name
+
+    elapsed = event.data.get("elapsed_seconds")
+    if isinstance(elapsed, (int, float)):
+        detail = f"{detail} elapsed={elapsed:.3f}s"
+
+    category = event.data.get("error_category")
+    message = event.data.get("message")
+    if category:
+        detail = f"{detail} category={category}"
+    if message:
+        detail = f"{detail} message={message}"
+
+    typer.echo(
+        f"[trace] {timestamp} run={event.run_id} {detail}",
+        err=True,
+    )
+
+
 @app.command()
-def chat(prompt: str = typer.Argument(..., help="The message to send to Qwen.")) -> None:
+def chat(
+    prompt: str = typer.Argument(..., help="The message to send to Qwen."),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show sanitized run events on stderr (not private model reasoning).",
+    ),
+) -> None:
     """Send one prompt to Qwen and print its response."""
     try:
-        harness = build_harness()
+        harness = (
+            build_harness(event_sink=_render_verbose_event)
+            if verbose
+            else build_harness()
+        )
         typer.echo(harness.chat(prompt))
     except Exception as exc:
         if _is_expected_runtime_error(exc):

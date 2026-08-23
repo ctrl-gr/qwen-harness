@@ -2,17 +2,25 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Protocol
+from datetime import datetime, timezone
+from time import perf_counter
+from types import MappingProxyType
+from typing import Any, Callable, Mapping, Protocol
+from uuid import uuid4
 
 from pydantic import TypeAdapter
 
 from qwen_harness.orchestration import (
     ModelDecision,
     FinishDecision,
+    RunEvent,
     RunLifecycle,
     RunState,
     TransitionEvent,
 )
+
+
+EventSink = Callable[[RunEvent], None]
 
 
 class HarnessError(Exception):
@@ -78,6 +86,7 @@ class Harness:
     max_steps: int
     timeout_seconds: float
     max_output_tokens: int
+    event_sink: EventSink | None = None
 
     def __post_init__(self) -> None:
         if self.max_steps <= 0:
@@ -104,9 +113,61 @@ class Harness:
         if not prompt.strip():
             raise InvalidPromptError("prompt must not be empty")
 
+        run_id = uuid4().hex
+        run_started = perf_counter()
+        model_started = run_started
+        verification_started = run_started
+
+        def emit(name: str, data: Mapping[str, Any] | None = None) -> None:
+            if self.event_sink is None:
+                return
+            try:
+                # Sinks are an optional, non-blocking observability boundary.
+                # Their failures must never change the result of a harness run.
+                self.event_sink(
+                    RunEvent(
+                        run_id=run_id,
+                        timestamp=datetime.now(timezone.utc),
+                        name=name,
+                        data=MappingProxyType(dict(data or {})),
+                    )
+                )
+            except Exception:
+                pass
+
         lifecycle = RunLifecycle()
-        lifecycle.transition(RunState.BUILDING_CONTEXT)
-        lifecycle.transition(RunState.CALLING_MODEL)
+
+        def transition(destination: RunState) -> None:
+            previous = lifecycle.state
+            lifecycle.transition(destination)
+            emit(
+                "state.transition",
+                {"from_state": previous.value, "to_state": destination.value},
+            )
+
+        def emit_failure(category: str, message: str) -> None:
+            emit(
+                "run.failed",
+                {
+                    "error_category": category,
+                    "message": message,
+                    "elapsed_seconds": perf_counter() - run_started,
+                },
+            )
+
+        emit(
+            "run.started",
+            {
+                "prompt_characters": len(prompt),
+                "max_model_calls": self.max_steps,
+                "timeout_seconds": self.timeout_seconds,
+                "max_output_tokens": self.max_output_tokens,
+            },
+        )
+        transition(RunState.BUILDING_CONTEXT)
+        transition(RunState.CALLING_MODEL)
+        model_started = perf_counter()
+        emit("model.call.started")
         run = self.agent.run(
             prompt,
             # Phase 1 has only one legal action. Let the small model generate
@@ -123,28 +184,61 @@ class Harness:
         try:
             result = await asyncio.wait_for(run, timeout=self.timeout_seconds)
         except asyncio.TimeoutError as exc:
-            lifecycle.transition(RunState.FAILED)
+            transition(RunState.FAILED)
+            emit_failure("timeout", "The model call timed out.")
             raise HarnessTimeoutError(
                 f"agent run exceeded {self.timeout_seconds:g} seconds",
                 lifecycle,
             ) from exc
         except UnexpectedModelBehavior as exc:
-            lifecycle.transition(RunState.FAILED)
+            transition(RunState.FAILED)
+            emit_failure(
+                "invalid_model_output",
+                "The model returned an invalid response.",
+            )
             raise InvalidModelDecisionError(str(exc), lifecycle) from exc
         except Exception as exc:
-            lifecycle.transition(RunState.FAILED)
+            transition(RunState.FAILED)
+            if isinstance(exc, (ConnectionError, OSError)):
+                emit_failure(
+                    "connection_error",
+                    "The model service is unavailable.",
+                )
+            else:
+                emit_failure("model_error", "The model call failed.")
             raise HarnessExecutionError(str(exc), lifecycle) from exc
 
-        lifecycle.transition(RunState.VERIFYING)
+        emit(
+            "model.call.completed",
+            {
+                "elapsed_seconds": perf_counter() - model_started,
+                "output_characters": len(str(result.output)),
+            },
+        )
+        transition(RunState.VERIFYING)
+        verification_started = perf_counter()
+        emit("verification.started")
         try:
             decision = _coerce_decision(result.output)
             _verify_decision(decision)
         except Exception as exc:
-            lifecycle.transition(RunState.FAILED)
+            transition(RunState.FAILED)
+            emit_failure(
+                "invalid_model_output",
+                "The model returned an invalid response.",
+            )
             raise InvalidModelDecisionError(
                 f"model returned an invalid decision: {exc}", lifecycle
             ) from exc
-        lifecycle.transition(RunState.SUCCEEDED)
+        emit(
+            "verification.completed",
+            {"elapsed_seconds": perf_counter() - verification_started},
+        )
+        transition(RunState.SUCCEEDED)
+        emit(
+            "run.completed",
+            {"elapsed_seconds": perf_counter() - run_started},
+        )
         return HarnessRun(
             output=decision.content,
             decision=decision,

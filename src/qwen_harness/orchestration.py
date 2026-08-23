@@ -1,8 +1,9 @@
 """Typed decisions and Python-owned run lifecycle primitives."""
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,6 +29,16 @@ class TransitionEvent:
 
     from_state: RunState
     to_state: RunState
+
+
+@dataclass(frozen=True)
+class RunEvent:
+    """One sanitized, externally observable boundary in a harness run."""
+
+    run_id: str
+    timestamp: datetime
+    name: str
+    data: Mapping[str, Any]
 
 
 _ALLOWED_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
