@@ -17,6 +17,9 @@ from qwen_harness.orchestration import (
     RunEvent,
     RunLifecycle,
     RunState,
+    TaskContract,
+    ToolCallEvidence,
+    ToolEvidenceLedger,
     TransitionEvent,
 )
 from qwen_harness.observability import (
@@ -40,6 +43,10 @@ class InvalidPromptError(HarnessError):
     """Raised when a prompt is empty."""
 
 
+class InvalidTaskContractError(HarnessError, ValueError):
+    """Raised before model execution when a task contract is unsupported."""
+
+
 class HarnessRunError(HarnessError):
     """A failed run with its final state and immutable execution trace."""
 
@@ -59,6 +66,23 @@ class HarnessExecutionError(HarnessRunError):
 
 class InvalidModelDecisionError(HarnessRunError):
     """Raised when model output does not satisfy the decision protocol."""
+
+
+class IncompleteTaskError(HarnessRunError):
+    """Raised when the answer lacks the tool evidence required for success."""
+
+    def __init__(
+        self,
+        message: str,
+        lifecycle: RunLifecycle | None = None,
+        *,
+        evidence: tuple[ToolCallEvidence, ...] = (),
+        unmet_tools: frozenset[str] = frozenset(),
+    ) -> None:
+        super().__init__(message, lifecycle)
+        self.tool_evidence = evidence
+        self.evidence = evidence
+        self.unmet_tools = unmet_tools
 
 
 class RunResult(Protocol):
@@ -81,6 +105,12 @@ class HarnessRun:
     decision: ModelDecision
     final_state: RunState
     trace: tuple[TransitionEvent, ...]
+    tool_evidence: tuple[ToolCallEvidence, ...]
+
+    @property
+    def evidence(self) -> tuple[ToolCallEvidence, ...]:
+        """Backward-compatible short name for the tool evidence snapshot."""
+        return self.tool_evidence
 
 
 @dataclass(frozen=True)
@@ -94,6 +124,7 @@ class Harness:
     max_tool_calls: int = 4
     event_sink: EventSink | None = None
     workspace_root: Path | None = None
+    available_tools: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if self.max_steps <= 0:
@@ -105,15 +136,17 @@ class Harness:
         if self.max_tool_calls <= 0:
             raise ValueError("max_tool_calls must be greater than zero")
 
-    def chat(self, prompt: str) -> str:
+    def chat(self, prompt: str, *, contract: TaskContract | None = None) -> str:
         """Return one assistant response for a non-empty user prompt."""
-        return self.run(prompt).output
+        return self.run(prompt, contract=contract).output
 
-    def run(self, prompt: str) -> HarnessRun:
+    def run(self, prompt: str, *, contract: TaskContract | None = None) -> HarnessRun:
         """Execute one prompt and return its structured result and trace."""
-        return asyncio.run(self._run(prompt))
+        return asyncio.run(self._run(prompt, contract=contract))
 
-    async def _run(self, prompt: str) -> HarnessRun:
+    async def _run(
+        self, prompt: str, *, contract: TaskContract | None = None
+    ) -> HarnessRun:
         """Run one turn under a Python-owned lifecycle and deadline."""
         from pydantic_ai.exceptions import UnexpectedModelBehavior
         from pydantic_ai.settings import ModelSettings
@@ -121,13 +154,20 @@ class Harness:
 
         if not prompt.strip():
             raise InvalidPromptError("prompt must not be empty")
+        contract = contract or TaskContract()
+        unknown_tools = contract.required_tools - self.available_tools
+        if unknown_tools:
+            names = ", ".join(sorted(unknown_tools))
+            raise InvalidTaskContractError(f"unknown required tool(s): {names}")
 
         run_id = uuid4().hex
         run_started = perf_counter()
         model_started = run_started
         verification_started = run_started
+        evidence_ledger = ToolEvidenceLedger()
 
         def emit(name: str, data: Mapping[str, Any] | None = None) -> None:
+            evidence_ledger.observe(name, data or {})
             if self.event_sink is None:
                 return
             try:
@@ -178,21 +218,31 @@ class Harness:
         transition(RunState.CALLING_MODEL)
         model_started = perf_counter()
         emit("model.call.started")
-        run = self.agent.run(
-            prompt,
-            # Phase 1 has only one legal action. Let the small model generate
-            # plain content and let Python construct the terminal decision.
-            output_type=str,
-            usage_limits=UsageLimits(
+        run_arguments: dict[str, Any] = {
+            "output_type": str,
+            "usage_limits": UsageLimits(
                 request_limit=self.max_steps,
                 tool_calls_limit=self.max_tool_calls,
             ),
-            model_settings=ModelSettings(
+            "model_settings": ModelSettings(
                 timeout=self.timeout_seconds,
                 max_tokens=self.max_output_tokens,
                 thinking=False,
                 extra_body={"reasoning_effort": "none"},
             ),
+        }
+        if contract.required_tools:
+            required_names = ", ".join(sorted(contract.required_tools))
+            run_arguments["instructions"] = (
+                "Completion contract: successfully call these tools before "
+                f"answering: {required_names}. Retry correctable tool errors. "
+                "Do not claim completion without successful tool evidence."
+            )
+        run = self.agent.run(
+            prompt,
+            # Phase 1 has only one legal action. Let the small model generate
+            # plain content and let Python construct the terminal decision.
+            **run_arguments,
         )
         emitter_token = bind_run_event_emitter(emit)
         try:
@@ -246,6 +296,33 @@ class Harness:
             raise InvalidModelDecisionError(
                 f"model returned an invalid decision: {exc}", lifecycle
             ) from exc
+        required_or_attempted = (
+            contract.required_tools | evidence_ledger.attempted_tools
+        )
+        unmet_tools = required_or_attempted - evidence_ledger.successful_tools
+        if unmet_tools:
+            emit(
+                "verification.failed",
+                {
+                    "reason": "required_tool_not_completed",
+                    "unmet_tools": tuple(sorted(unmet_tools)),
+                },
+            )
+            transition(RunState.INCOMPLETE)
+            emit(
+                "run.incomplete",
+                {
+                    "reason": "required_tool_not_completed",
+                    "unmet_tools": tuple(sorted(unmet_tools)),
+                    "elapsed_seconds": perf_counter() - run_started,
+                },
+            )
+            raise IncompleteTaskError(
+                "Task requirements were not completed.",
+                lifecycle,
+                evidence=evidence_ledger.evidence,
+                unmet_tools=unmet_tools,
+            )
         emit(
             "verification.completed",
             {"elapsed_seconds": perf_counter() - verification_started},
@@ -260,6 +337,7 @@ class Harness:
             decision=decision,
             final_state=lifecycle.state,
             trace=lifecycle.trace,
+            tool_evidence=evidence_ledger.evidence,
         )
 
 

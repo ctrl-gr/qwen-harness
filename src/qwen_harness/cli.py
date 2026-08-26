@@ -13,12 +13,14 @@ from qwen_harness.harness import (
     HarnessConfigurationError,
     HarnessExecutionError,
     HarnessTimeoutError,
+    IncompleteTaskError,
     EventSink,
     InvalidModelDecisionError,
     InvalidPromptError,
+    InvalidTaskContractError,
 )
-from qwen_harness.orchestration import RunEvent
-from qwen_harness.tools import WorkspaceToolRegistry
+from qwen_harness.orchestration import RunEvent, TaskContract
+from qwen_harness.tools import WORKSPACE_TOOL_NAMES, WorkspaceToolRegistry
 
 
 app = typer.Typer(
@@ -26,7 +28,6 @@ app = typer.Typer(
     no_args_is_help=True,
     help="Run a bounded Qwen agent through a local Ollama server.",
 )
-
 
 @app.callback()
 def main() -> None:
@@ -92,6 +93,9 @@ def build_harness(
         max_tool_calls=settings.max_tool_calls,
         event_sink=event_sink,
         workspace_root=workspace_tools.workspace_root,
+        available_tools=frozenset(
+            definition.name for definition in workspace_tools.definitions
+        ),
     )
 
 
@@ -112,6 +116,8 @@ def _is_expected_runtime_error(exc: Exception) -> bool:
             HarnessTimeoutError,
             InvalidModelDecisionError,
             InvalidPromptError,
+            InvalidTaskContractError,
+            IncompleteTaskError,
             ValidationError,
             ConnectionError,
             httpx.HTTPError,
@@ -141,6 +147,9 @@ def _is_expected_runtime_error(exc: Exception) -> bool:
 
 
 def _expected_error_message(exc: Exception) -> str:
+    if isinstance(exc, IncompleteTaskError):
+        return "The requested task was not completed."
+
     if isinstance(exc, InvalidModelDecisionError):
         return "The model returned an invalid response."
 
@@ -186,10 +195,13 @@ def _render_verbose_event(event: RunEvent) -> None:
 
     category = event.data.get("error_category")
     message = event.data.get("message")
+    reason = event.data.get("reason")
     if category:
         detail = f"{detail} category={category}"
     if message:
         detail = f"{detail} message={message}"
+    if reason:
+        detail = f"{detail} reason={reason}"
 
     typer.echo(
         f"[trace] {timestamp} run={event.run_id} {detail}",
@@ -206,15 +218,28 @@ def chat(
         "-v",
         help="Show sanitized run events on stderr (not private model reasoning).",
     ),
+    require_tool: list[str] = typer.Option(
+        [],
+        "--require-tool",
+        help="Require successful evidence for this tool; may be repeated.",
+    ),
 ) -> None:
     """Send one prompt to Qwen and print its response."""
     try:
+        unknown_tools = frozenset(require_tool) - WORKSPACE_TOOL_NAMES
+        if unknown_tools:
+            names = ", ".join(sorted(unknown_tools))
+            raise InvalidTaskContractError(f"unknown required tool(s): {names}")
         harness = (
             build_harness(event_sink=_render_verbose_event)
             if verbose
             else build_harness()
         )
-        typer.echo(harness.chat(prompt))
+        if require_tool:
+            contract = TaskContract(required_tools=frozenset(require_tool))
+            typer.echo(harness.chat(prompt, contract=contract))
+        else:
+            typer.echo(harness.chat(prompt))
     except Exception as exc:
         if _is_expected_runtime_error(exc):
             _fail(_expected_error_message(exc))

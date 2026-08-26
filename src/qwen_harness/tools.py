@@ -19,6 +19,16 @@ from qwen_harness.observability import emit_current_run_event
 from qwen_harness.orchestration import RunEvent
 
 
+WORKSPACE_TOOL_NAMES = frozenset({"list_files", "read_file", "search_text"})
+
+
+def _tool_name(name: str) -> str:
+    """Keep registry definitions tied to the exported canonical name set."""
+    if name not in WORKSPACE_TOOL_NAMES:
+        raise ValueError(f"workspace tool name is not canonical: {name}")
+    return name
+
+
 class WorkspaceToolError(Exception):
     """Base class for expected workspace-tool failures."""
 
@@ -166,21 +176,21 @@ class WorkspaceToolRegistry:
         self._standalone_run_id = f"tool-session-{uuid4().hex}"
         self.definitions = (
             ToolDefinition(
-                "list_files",
+                _tool_name("list_files"),
                 ToolRisk.READ,
                 ListFilesInput,
                 ListFilesOutput,
                 self._list_files,
             ),
             ToolDefinition(
-                "read_file",
+                _tool_name("read_file"),
                 ToolRisk.READ,
                 ReadFileInput,
                 ReadFileOutput,
                 self._read_file,
             ),
             ToolDefinition(
-                "search_text",
+                _tool_name("search_text"),
                 ToolRisk.READ,
                 SearchTextInput,
                 SearchTextOutput,

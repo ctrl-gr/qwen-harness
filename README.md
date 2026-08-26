@@ -29,6 +29,18 @@ Add `--verbose` (or `-v`) to follow the observable execution on stderr:
 qwen-harness chat --verbose "Explain dependency injection in one paragraph."
 ```
 
+For tasks that must use a workspace tool, declare the completion contract:
+
+```powershell
+qwen-harness chat --verbose --require-tool list_files "List the workspace files."
+```
+
+`--require-tool` may be repeated. Python marks the run successful only when
+every declared tool—and every tool the model actually attempted—has at least
+one successful call. A correctable failed call may be retried; a later success
+for the same tool satisfies the contract. Otherwise the command exits nonzero
+as `INCOMPLETE` and does not print the model's plausible-but-unverified answer.
+
 Verbose events include a run ID, UTC timestamps, state transitions, model and
 verification boundaries, errors, and elapsed time. They intentionally exclude
 prompts, generated content, credentials, and private model chain-of-thought.
@@ -83,13 +95,15 @@ lifecycle and only permits these transitions:
 
 ```text
 CREATED -> BUILDING_CONTEXT -> CALLING_MODEL -> VERIFYING -> SUCCEEDED
+                                                   |
+                                                   +-> INCOMPLETE
               Any nonterminal state may transition to FAILED.
 ```
 
 `Harness.chat(prompt)` remains the simple string-returning interface used by the
 CLI. `Harness.run(prompt)` also exposes the validated model decision, final
-state, and immutable transition trace. Tool execution is intentionally not part
-of Phase 1; it will be added behind typed interfaces and permission checks.
+state, immutable transition trace, and sanitized tool-call evidence. Callers
+can pass a `TaskContract` to make successful tool evidence mandatory.
 
 Phase 1 asks Qwen only for plain response text because there is no action to
 choose yet. Python wraps that text in the strict terminal decision and verifies
