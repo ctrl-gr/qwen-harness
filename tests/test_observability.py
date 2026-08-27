@@ -54,6 +54,7 @@ def test_successful_run_emits_structured_events_for_each_observable_boundary() -
     assert [event.name for event in events] == [
         "run.started",
         "state.transition",
+        "context.built",
         "state.transition",
         "model.call.started",
         "model.call.completed",

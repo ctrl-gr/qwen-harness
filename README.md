@@ -48,6 +48,20 @@ The final response remains on stdout, so it can still be redirected or piped.
 Event sinks must return promptly; they are best-effort diagnostics, and sink
 exceptions are isolated so logging cannot change a run's outcome.
 
+## Per-run context
+
+Python builds a concise, versioned context for every run. It contains stable
+safety invariants and only the completion requirements relevant to the current
+task; it does not copy the user's prompt, enumerate irrelevant tools, or retain
+conversation history. The `context.built` event records only the context
+version, allowing context-template changes to be traced without logging
+sensitive text.
+
+This is intentionally small for the 0.8B model: tool schemas describe available
+operations, while per-run instructions say when evidence is mandatory. Working
+memory and retrieved knowledge will be added later as separate bounded layers
+rather than by growing one permanent system prompt.
+
 ## Read-only workspace tools
 
 The agent can list files, read bounded UTF-8 text files, and search text under

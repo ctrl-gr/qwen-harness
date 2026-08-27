@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter
 
+from qwen_harness.context import ContextBuilder
 from qwen_harness.orchestration import (
     ModelDecision,
     FinishDecision,
@@ -215,11 +216,20 @@ class Harness:
             },
         )
         transition(RunState.BUILDING_CONTEXT)
+        task_context = ContextBuilder().build(
+            contract=contract,
+            available_tools=self.available_tools,
+        )
+        emit(
+            "context.built",
+            {"context_version": task_context.version},
+        )
         transition(RunState.CALLING_MODEL)
         model_started = perf_counter()
         emit("model.call.started")
         run_arguments: dict[str, Any] = {
             "output_type": str,
+            "instructions": task_context.instructions,
             "usage_limits": UsageLimits(
                 request_limit=self.max_steps,
                 tool_calls_limit=self.max_tool_calls,
@@ -231,13 +241,6 @@ class Harness:
                 extra_body={"reasoning_effort": "none"},
             ),
         }
-        if contract.required_tools:
-            required_names = ", ".join(sorted(contract.required_tools))
-            run_arguments["instructions"] = (
-                "Completion contract: successfully call these tools before "
-                f"answering: {required_names}. Retry correctable tool errors. "
-                "Do not claim completion without successful tool evidence."
-            )
         run = self.agent.run(
             prompt,
             # Phase 1 has only one legal action. Let the small model generate

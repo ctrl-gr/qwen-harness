@@ -77,12 +77,6 @@ def build_harness(
     )
     agent = Agent(
         model,
-        instructions=(
-            "You are a careful local software assistant. Follow the user's "
-            "request and state uncertainty plainly. You may inspect only the "
-            "configured workspace using the provided read-only tools. Never "
-            "claim to have modified a file."
-        ),
         tools=list(workspace_tools.pydantic_ai_tools),
     )
     return Harness(
