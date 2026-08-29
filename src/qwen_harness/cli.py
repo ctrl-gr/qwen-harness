@@ -19,6 +19,7 @@ from qwen_harness.harness import (
     InvalidPromptError,
     InvalidTaskContractError,
 )
+from qwen_harness.metrics import SQLiteMetricsStore, generate_metrics_report
 from qwen_harness.orchestration import RunEvent, TaskContract
 from qwen_harness.tools import WORKSPACE_TOOL_NAMES, WorkspaceToolRegistry
 
@@ -79,6 +80,10 @@ def build_harness(
         model,
         tools=list(workspace_tools.pydantic_ai_tools),
     )
+    metrics_path = settings.metrics_database
+    if not metrics_path.is_absolute():
+        metrics_path = workspace_tools.workspace_root / metrics_path
+    metrics_store = SQLiteMetricsStore(metrics_path)
     return Harness(
         agent=agent,
         max_steps=settings.max_steps,
@@ -90,6 +95,9 @@ def build_harness(
         available_tools=frozenset(
             definition.name for definition in workspace_tools.definitions
         ),
+        context_capacity=settings.context_window_tokens,
+        model_name=settings.model,
+        metrics_sink=metrics_store.record,
     )
 
 
@@ -238,6 +246,35 @@ def chat(
         if _is_expected_runtime_error(exc):
             _fail(_expected_error_message(exc))
         raise
+
+
+@app.command()
+def stats(
+    database: Path | None = typer.Option(
+        None,
+        "--database",
+        help="SQLite metrics database; defaults to harness configuration.",
+    ),
+    output: Path = typer.Option(
+        Path("token-usage.html"),
+        "--output",
+        help="Self-contained HTML report to generate.",
+    ),
+    limit: int = typer.Option(
+        50,
+        "--limit",
+        min=1,
+        help="Maximum number of recent runs to chart.",
+    ),
+) -> None:
+    """Generate local token and context-usage graphs without loading Qwen."""
+    database_path = database or Settings().metrics_database
+    report = generate_metrics_report(
+        SQLiteMetricsStore(database_path),
+        output,
+        limit=limit,
+    )
+    typer.echo(str(report.resolve()))
 
 
 if __name__ == "__main__":

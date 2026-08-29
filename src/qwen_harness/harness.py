@@ -12,6 +12,11 @@ from uuid import uuid4
 from pydantic import TypeAdapter
 
 from qwen_harness.context import ContextBuilder
+from qwen_harness.metrics import (
+    RunMetrics,
+    TokenUsage,
+    collect_token_usage,
+)
 from qwen_harness.orchestration import (
     ModelDecision,
     FinishDecision,
@@ -30,6 +35,7 @@ from qwen_harness.observability import (
 
 
 EventSink = Callable[[RunEvent], None]
+MetricsSink = Callable[[RunMetrics], None]
 
 
 class HarnessError(Exception):
@@ -107,6 +113,7 @@ class HarnessRun:
     final_state: RunState
     trace: tuple[TransitionEvent, ...]
     tool_evidence: tuple[ToolCallEvidence, ...]
+    token_usage: TokenUsage | None = None
 
     @property
     def evidence(self) -> tuple[ToolCallEvidence, ...]:
@@ -126,6 +133,9 @@ class Harness:
     event_sink: EventSink | None = None
     workspace_root: Path | None = None
     available_tools: frozenset[str] = frozenset()
+    context_capacity: int = 2_048
+    model_name: str = "unknown"
+    metrics_sink: MetricsSink | None = None
 
     def __post_init__(self) -> None:
         if self.max_steps <= 0:
@@ -136,6 +146,8 @@ class Harness:
             raise ValueError("max_output_tokens must be greater than zero")
         if self.max_tool_calls <= 0:
             raise ValueError("max_tool_calls must be greater than zero")
+        if self.context_capacity <= 0:
+            raise ValueError("context_capacity must be greater than zero")
 
     def chat(self, prompt: str, *, contract: TaskContract | None = None) -> str:
         """Return one assistant response for a non-empty user prompt."""
@@ -162,10 +174,12 @@ class Harness:
             raise InvalidTaskContractError(f"unknown required tool(s): {names}")
 
         run_id = uuid4().hex
+        run_timestamp = datetime.now(timezone.utc)
         run_started = perf_counter()
         model_started = run_started
         verification_started = run_started
         evidence_ledger = ToolEvidenceLedger()
+        token_usage: TokenUsage | None = None
 
         def emit(name: str, data: Mapping[str, Any] | None = None) -> None:
             evidence_ledger.observe(name, data or {})
@@ -204,6 +218,24 @@ class Harness:
                     "elapsed_seconds": perf_counter() - run_started,
                 },
             )
+
+        def persist_metrics(final_state: RunState) -> None:
+            if self.metrics_sink is None or token_usage is None:
+                return
+            try:
+                self.metrics_sink(
+                    RunMetrics(
+                        run_id=run_id,
+                        timestamp=run_timestamp,
+                        model=self.model_name,
+                        final_state=final_state.value,
+                        elapsed_seconds=perf_counter() - run_started,
+                        token_usage=token_usage,
+                    )
+                )
+            except Exception:
+                # Local telemetry is best-effort and cannot alter task outcome.
+                pass
 
         emit(
             "run.started",
@@ -284,6 +316,24 @@ class Harness:
                 "output_characters": len(str(result.output)),
             },
         )
+        token_usage = collect_token_usage(
+            result,
+            context_capacity=self.context_capacity,
+        )
+        if token_usage is not None:
+            emit(
+                "model.usage",
+                {
+                    "input_tokens": token_usage.input_tokens,
+                    "output_tokens": token_usage.output_tokens,
+                    "total_tokens": token_usage.total_tokens,
+                    "requests": token_usage.requests,
+                    "tool_calls": token_usage.tool_calls,
+                    "peak_context_tokens": token_usage.peak_context_tokens,
+                    "context_capacity": token_usage.context_capacity,
+                    "context_utilization": token_usage.context_utilization,
+                },
+            )
         transition(RunState.VERIFYING)
         verification_started = perf_counter()
         emit("verification.started")
@@ -292,6 +342,7 @@ class Harness:
             _verify_decision(decision)
         except Exception as exc:
             transition(RunState.FAILED)
+            persist_metrics(RunState.FAILED)
             emit_failure(
                 "invalid_model_output",
                 "The model returned an invalid response.",
@@ -312,6 +363,7 @@ class Harness:
                 },
             )
             transition(RunState.INCOMPLETE)
+            persist_metrics(RunState.INCOMPLETE)
             emit(
                 "run.incomplete",
                 {
@@ -331,6 +383,7 @@ class Harness:
             {"elapsed_seconds": perf_counter() - verification_started},
         )
         transition(RunState.SUCCEEDED)
+        persist_metrics(RunState.SUCCEEDED)
         emit(
             "run.completed",
             {"elapsed_seconds": perf_counter() - run_started},
@@ -341,6 +394,7 @@ class Harness:
             final_state=lifecycle.state,
             trace=lifecycle.trace,
             tool_evidence=evidence_ledger.evidence,
+            token_usage=token_usage,
         )
 
 

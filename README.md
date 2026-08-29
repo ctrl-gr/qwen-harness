@@ -62,6 +62,28 @@ operations, while per-run instructions say when evidence is mandatory. Working
 memory and retrieved knowledge will be added later as separate bounded layers
 rather than by growing one permanent system prompt.
 
+## Token metrics
+
+Completed model runs record provider-reported token counts in
+`.qwen-harness/metrics.sqlite3`. The database contains run IDs, timestamps,
+model/state, latency, aggregate input/output counts, per-request counts, and
+peak context utilization. It never stores prompts, responses, tool arguments,
+or tool results. Metrics writes are transactional and best-effort: telemetry
+failure cannot change the task result.
+
+Generate a self-contained local report without starting Ollama:
+
+```powershell
+qwen-harness stats --output token-usage.html
+```
+
+The stacked chart shows total input and output tokens processed per run. The
+context chart uses the largest individual request in each run, rather than the
+aggregate input count, against the configured context capacity. Both the local
+database and default report are ignored by Git.
+If the output file already exists, the generator creates and verifies a
+numbered `.bak` copy before replacing it atomically.
+
 ## Read-only workspace tools
 
 The agent can list files, read bounded UTF-8 text files, and search text under
@@ -87,6 +109,8 @@ Configuration is read from environment variables:
 | `HARNESS_MAX_STEPS` | `4` | Maximum model requests per run |
 | `HARNESS_TIMEOUT_SECONDS` | `120` | HTTP timeout per request |
 | `HARNESS_MAX_OUTPUT_TOKENS` | `512` | Maximum generated tokens per response |
+| `HARNESS_CONTEXT_WINDOW_TOKENS` | `2048` | Context capacity used for utilization metrics |
+| `HARNESS_METRICS_DATABASE` | `.qwen-harness/metrics.sqlite3` | Local sanitized SQLite metrics path |
 | `HARNESS_MAX_TOOL_CALLS` | `4` | Maximum tool calls per run |
 | `HARNESS_MAX_LIST_ENTRIES` | `200` | Maximum entries returned by one listing |
 | `HARNESS_MAX_FILE_BYTES` | `4000` | Maximum bytes read from one text file |

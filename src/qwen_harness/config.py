@@ -1,5 +1,7 @@
 """Validated runtime configuration."""
 
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -36,6 +38,15 @@ class Settings(BaseSettings):
         default=512,
         validation_alias="HARNESS_MAX_OUTPUT_TOKENS",
         gt=0,
+    )
+    context_window_tokens: int = Field(
+        default=2_048,
+        validation_alias="HARNESS_CONTEXT_WINDOW_TOKENS",
+        gt=0,
+    )
+    metrics_database: Path = Field(
+        default=Path(".qwen-harness/metrics.sqlite3"),
+        validation_alias="HARNESS_METRICS_DATABASE",
     )
     max_tool_calls: int = Field(
         default=4,
