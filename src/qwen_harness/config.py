@@ -2,8 +2,10 @@
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from qwen_harness.context import DEFAULT_CONTEXT_OVERHEAD_TOKENS
 
 
 class Settings(BaseSettings):
@@ -42,6 +44,11 @@ class Settings(BaseSettings):
     context_window_tokens: int = Field(
         default=2_048,
         validation_alias="HARNESS_CONTEXT_WINDOW_TOKENS",
+        gt=0,
+    )
+    context_overhead_tokens: int = Field(
+        default=DEFAULT_CONTEXT_OVERHEAD_TOKENS,
+        validation_alias="HARNESS_CONTEXT_OVERHEAD_TOKENS",
         gt=0,
     )
     metrics_database: Path = Field(
@@ -93,3 +100,21 @@ class Settings(BaseSettings):
         validation_alias="HARNESS_TOOL_TIMEOUT_SECONDS",
         gt=0,
     )
+
+    @model_validator(mode="after")
+    def validate_context_budget(self) -> "Settings":
+        if (
+            self.model == "qwen3.5:0.8b-cpu"
+            and self.context_window_tokens != 2_048
+        ):
+            raise ValueError(
+                "qwen3.5:0.8b-cpu context must match Modelfile.cpu num_ctx 2048"
+            )
+        if (
+            self.max_output_tokens + self.context_overhead_tokens
+            >= self.context_window_tokens
+        ):
+            raise ValueError(
+                "output and overhead reserves must be smaller than context window"
+            )
+        return self

@@ -11,7 +11,13 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter
 
-from qwen_harness.context import ContextBuilder
+from qwen_harness.context import (
+    DEFAULT_CONTEXT_OVERHEAD_TOKENS,
+    ContextBudgetCapability,
+    ContextBudgetError,
+    ContextBudgetPlanner,
+    ContextBuilder,
+)
 from qwen_harness.metrics import (
     RunMetrics,
     TokenUsage,
@@ -135,6 +141,7 @@ class Harness:
     workspace_root: Path | None = None
     available_tools: frozenset[str] = frozenset()
     context_capacity: int = 2_048
+    context_overhead_tokens: int = DEFAULT_CONTEXT_OVERHEAD_TOKENS
     model_name: str = "unknown"
     metrics_sink: MetricsSink | None = None
 
@@ -149,6 +156,15 @@ class Harness:
             raise ValueError("max_tool_calls must be greater than zero")
         if self.context_capacity <= 0:
             raise ValueError("context_capacity must be greater than zero")
+        if self.context_overhead_tokens <= 0:
+            raise ValueError("context_overhead_tokens must be greater than zero")
+        if (
+            self.max_output_tokens + self.context_overhead_tokens
+            >= self.context_capacity
+        ):
+            raise ValueError(
+                "output and overhead reserves must be smaller than context capacity"
+            )
 
     def chat(
         self,
@@ -275,9 +291,10 @@ class Harness:
         )
         memory_history: tuple[Any, ...] = ()
         memory_revision: int | None = None
+        memory_turns: tuple[tuple[Any, ...], ...] = ()
         if memory is not None:
             memory_snapshot = memory.inspect()
-            memory_history = memory_snapshot.messages
+            memory_turns = memory_snapshot.turns
             memory_revision = memory_snapshot.revision
             emit(
                 "memory.loaded",
@@ -287,6 +304,37 @@ class Harness:
                     "serialized_bytes": memory_snapshot.serialized_bytes,
                 },
             )
+        try:
+            budget = ContextBudgetPlanner().plan(
+                instructions=task_context.instructions,
+                prompt=prompt,
+                memory_turns=memory_turns,
+                context_capacity=self.context_capacity,
+                reserved_output_tokens=self.max_output_tokens,
+                reserved_overhead_tokens=self.context_overhead_tokens,
+            )
+        except ContextBudgetError:
+            transition(RunState.FAILED)
+            emit_failure(
+                "context_budget_exceeded",
+                "Essential context does not fit the configured budget.",
+            )
+            raise
+        memory_history = budget.selected_messages
+        emit(
+            "context.budgeted",
+            {
+                "context_capacity": budget.context_capacity,
+                "reserved_output_tokens": budget.reserved_output_tokens,
+                "reserved_overhead_tokens": budget.reserved_overhead_tokens,
+                "available_input_tokens": budget.available_input_tokens,
+                "estimated_input_tokens": budget.estimated_input_tokens,
+                "selected_memory_turn_count": budget.selected_memory_turn_count,
+                "selected_memory_message_count": budget.selected_memory_message_count,
+                "trimmed_memory_turn_count": budget.trimmed_memory_turn_count,
+                "trimmed_memory_message_count": budget.trimmed_memory_message_count,
+            },
+        )
         transition(RunState.CALLING_MODEL)
         model_started = perf_counter()
         emit("model.call.started")
@@ -296,6 +344,13 @@ class Harness:
             "usage_limits": UsageLimits(
                 request_limit=self.max_steps,
                 tool_calls_limit=self.max_tool_calls,
+            ),
+            "capabilities": (
+                ContextBudgetCapability(
+                    context_capacity=self.context_capacity,
+                    reserved_output_tokens=self.max_output_tokens,
+                    reserved_overhead_tokens=self.context_overhead_tokens,
+                ),
             ),
             "model_settings": ModelSettings(
                 timeout=self.timeout_seconds,
@@ -329,6 +384,13 @@ class Harness:
                 "The model returned an invalid response.",
             )
             raise InvalidModelDecisionError(str(exc), lifecycle) from exc
+        except ContextBudgetError:
+            transition(RunState.FAILED)
+            emit_failure(
+                "context_budget_exceeded",
+                "A prepared model request exceeded the context budget.",
+            )
+            raise
         except Exception as exc:
             transition(RunState.FAILED)
             if isinstance(exc, (ConnectionError, OSError)):

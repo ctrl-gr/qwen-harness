@@ -55,6 +55,7 @@ def test_successful_run_emits_structured_events_for_each_observable_boundary() -
         "run.started",
         "state.transition",
         "context.built",
+        "context.budgeted",
         "state.transition",
         "model.call.started",
         "model.call.completed",

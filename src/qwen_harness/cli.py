@@ -11,6 +11,7 @@ from qwen_harness.config import Settings
 from qwen_harness.harness import (
     Harness,
     HarnessConfigurationError,
+    ContextBudgetError,
     HarnessExecutionError,
     HarnessTimeoutError,
     IncompleteTaskError,
@@ -96,6 +97,7 @@ def build_harness(
             definition.name for definition in workspace_tools.definitions
         ),
         context_capacity=settings.context_window_tokens,
+        context_overhead_tokens=settings.context_overhead_tokens,
         model_name=settings.model,
         metrics_sink=metrics_store.record,
     )
@@ -115,6 +117,7 @@ def _is_expected_runtime_error(exc: Exception) -> bool:
         exc,
         (
             HarnessConfigurationError,
+            ContextBudgetError,
             HarnessTimeoutError,
             InvalidModelDecisionError,
             InvalidPromptError,
@@ -268,7 +271,10 @@ def stats(
     ),
 ) -> None:
     """Generate local token and context-usage graphs without loading Qwen."""
-    database_path = database or Settings().metrics_database
+    try:
+        database_path = database or Settings().metrics_database
+    except ValidationError as exc:
+        _fail(str(exc))
     report = generate_metrics_report(
         SQLiteMetricsStore(database_path),
         output,

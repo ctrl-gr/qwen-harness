@@ -13,6 +13,7 @@ def test_settings_use_local_qwen_defaults(monkeypatch: pytest.MonkeyPatch) -> No
         "HARNESS_TIMEOUT_SECONDS",
         "HARNESS_MAX_OUTPUT_TOKENS",
         "HARNESS_CONTEXT_WINDOW_TOKENS",
+        "HARNESS_CONTEXT_OVERHEAD_TOKENS",
         "HARNESS_METRICS_DATABASE",
         "HARNESS_MAX_TOOL_CALLS",
         "HARNESS_MAX_LIST_ENTRIES",
@@ -34,6 +35,7 @@ def test_settings_use_local_qwen_defaults(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.timeout_seconds > 0
     assert settings.max_output_tokens == 512
     assert settings.context_window_tokens == 2_048
+    assert settings.context_overhead_tokens == 256
     assert settings.metrics_database == Path(".qwen-harness/metrics.sqlite3")
     assert settings.max_tool_calls > 0
     assert settings.max_list_entries > 0
@@ -56,6 +58,7 @@ def test_settings_read_ollama_environment(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("HARNESS_TIMEOUT_SECONDS", "15")
     monkeypatch.setenv("HARNESS_MAX_OUTPUT_TOKENS", "128")
     monkeypatch.setenv("HARNESS_CONTEXT_WINDOW_TOKENS", "4096")
+    monkeypatch.setenv("HARNESS_CONTEXT_OVERHEAD_TOKENS", "192")
     monkeypatch.setenv("HARNESS_METRICS_DATABASE", "telemetry/tokens.sqlite3")
     monkeypatch.setenv("HARNESS_MAX_TOOL_CALLS", "2")
     monkeypatch.setenv("HARNESS_MAX_LIST_ENTRIES", "20")
@@ -75,6 +78,7 @@ def test_settings_read_ollama_environment(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.timeout_seconds == 15
     assert settings.max_output_tokens == 128
     assert settings.context_window_tokens == 4_096
+    assert settings.context_overhead_tokens == 192
     assert settings.metrics_database == Path("telemetry/tokens.sqlite3")
     assert settings.max_tool_calls == 2
     assert settings.max_list_entries == 20
@@ -111,6 +115,7 @@ def test_cpu_modelfile_uses_lightweight_qwen_with_cpu_only_limits() -> None:
         ("timeout_seconds", -0.1),
         ("max_output_tokens", 0),
         ("context_window_tokens", 0),
+        ("context_overhead_tokens", 0),
         ("max_tool_calls", 0),
         ("max_list_entries", 0),
         ("max_file_bytes", 0),

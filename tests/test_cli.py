@@ -371,3 +371,45 @@ def test_openai_client_disables_hidden_retries(
 
     assert captured["max_retries"] == 0
     assert captured["timeout"] == 17
+
+
+def test_stats_with_explicit_database_ignores_unrelated_invalid_context_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    database = tmp_path / "existing-metrics.sqlite3"
+    output = tmp_path / "report.html"
+    monkeypatch.setenv("HARNESS_CONTEXT_WINDOW_TOKENS", "100")
+    monkeypatch.setenv("HARNESS_MAX_OUTPUT_TOKENS", "100")
+
+    result = runner.invoke(
+        app,
+        [
+            "stats",
+            "--database",
+            str(database),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert output.exists()
+    assert "Traceback" not in result.output
+
+
+def test_stats_without_database_reports_invalid_settings_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    monkeypatch.setenv("HARNESS_CONTEXT_WINDOW_TOKENS", "100")
+    monkeypatch.setenv("HARNESS_MAX_OUTPUT_TOKENS", "100")
+
+    result = runner.invoke(
+        app,
+        ["stats", "--output", str(tmp_path / "report.html")],
+    )
+
+    assert result.exit_code != 0
+    assert "Error:" in result.output
+    assert "Traceback" not in result.output

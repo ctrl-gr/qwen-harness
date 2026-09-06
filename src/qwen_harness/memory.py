@@ -32,6 +32,7 @@ class MemorySnapshot:
     """One atomic, immutable view of memory and its revision."""
 
     messages: tuple[ModelMessage, ...]
+    turns: tuple[tuple[ModelMessage, ...], ...]
     revision: int
     turn_count: int
     serialized_bytes: int
@@ -91,8 +92,12 @@ class WorkingMemory:
     def inspect(self) -> MemorySnapshot:
         """Return messages and sanitized counts from one memory revision."""
         with self._lock:
+            copied_turns = tuple(
+                tuple(deepcopy(turn)) for turn in self._turns
+            )
             return MemorySnapshot(
-                messages=tuple(deepcopy(_flatten(self._turns))),
+                messages=_flatten(copied_turns),
+                turns=copied_turns,
                 revision=self._revision,
                 turn_count=len(self._turns),
                 serialized_bytes=self._serialized_bytes,

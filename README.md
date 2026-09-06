@@ -88,6 +88,31 @@ Concurrent runs use revision checks: if two runs read the same memory state,
 only the first completed update is retained, rather than recording a false
 conversation order for the other run.
 
+## Context budget
+
+Every prepared provider request now passes a budget check before Ollama is
+contacted, including later requests made after a tool returns data. The
+2,048-token window is divided into a reserved output allowance, a configurable
+chat-framing safety margin, and the remaining input allowance. Stable
+instructions and the current prompt are mandatory. Working memory receives the
+remaining space and contributes only the newest contiguous complete turns; it
+is never modified when older turns are omitted from one call. The per-request
+check also measures the actual tool definitions PydanticAI prepared for that
+request.
+
+The local preflight uses public PydanticAI serialization and a conservative
+UTF-8 byte heuristic because the Ollama-compatible boundary does not provide
+exact Qwen tokenization before generation. Provider-reported usage remains the
+authoritative after-call measurement. A prompt or later tool result that cannot
+fit is rejected rather than silently truncated. The sanitized
+`context.budgeted` and `model.context.checked` events report only capacities,
+estimates, schema counts, and selected/trimmed counts.
+
+For the `qwen3.5:0.8b-cpu` tag, the configured window must remain 2,048 so it
+matches `PARAMETER num_ctx 2048` in `Modelfile.cpu`. Ollama's OpenAI-compatible
+API cannot change that value per request; a different window requires a new
+model tag built from a matching Modelfile.
+
 ## Token metrics
 
 Completed model runs record provider-reported token counts in
@@ -135,7 +160,8 @@ Configuration is read from environment variables:
 | `HARNESS_MAX_STEPS` | `4` | Maximum model requests per run |
 | `HARNESS_TIMEOUT_SECONDS` | `120` | HTTP timeout per request |
 | `HARNESS_MAX_OUTPUT_TOKENS` | `512` | Maximum generated tokens per response |
-| `HARNESS_CONTEXT_WINDOW_TOKENS` | `2048` | Context capacity used for utilization metrics |
+| `HARNESS_CONTEXT_WINDOW_TOKENS` | `2048` | Context capacity used for preflight and utilization metrics |
+| `HARNESS_CONTEXT_OVERHEAD_TOKENS` | `256` | Additional chat-framing safety margin |
 | `HARNESS_METRICS_DATABASE` | `.qwen-harness/metrics.sqlite3` | Local sanitized SQLite metrics path |
 | `HARNESS_MAX_TOOL_CALLS` | `4` | Maximum tool calls per run |
 | `HARNESS_MAX_LIST_ENTRIES` | `200` | Maximum entries returned by one listing |
