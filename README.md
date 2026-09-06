@@ -59,8 +59,34 @@ sensitive text.
 
 This is intentionally small for the 0.8B model: tool schemas describe available
 operations, while per-run instructions say when evidence is mandatory. Working
-memory and retrieved knowledge will be added later as separate bounded layers
-rather than by growing one permanent system prompt.
+memory is a separate bounded layer below; retrieved knowledge will be added
+later rather than by growing one permanent system prompt.
+
+## Bounded working memory
+
+`WorkingMemory` carries recent typed PydanticAI message turns between calls in
+the same Python process. It keeps complete turns—including paired tool calls and
+results—and evicts only the oldest whole turns until both its turn-count and
+exact serialized-byte limits are satisfied. A single oversized turn is dropped
+instead of exceeding the configured bound. Structurally incomplete tool turns
+are also rejected so broken history cannot poison the next model call.
+
+```python
+from qwen_harness.memory import WorkingMemory
+
+memory = WorkingMemory(max_turns=3, max_serialized_bytes=6_000)
+harness.chat("Inspect the project", memory=memory)
+harness.chat("What did you find?", memory=memory)
+```
+
+Memory content remains in RAM, is never written to the metrics database, and is
+remembered only after successful verification. Verbose events expose only
+turn/message/byte counts and eviction totals. The byte bound controls storage;
+the token metrics report remains the authoritative measurement of actual model
+context usage. The one-shot CLI does not enable memory automatically.
+Concurrent runs use revision checks: if two runs read the same memory state,
+only the first completed update is retained, rather than recording a false
+conversation order for the other run.
 
 ## Token metrics
 

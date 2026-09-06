@@ -17,6 +17,7 @@ from qwen_harness.metrics import (
     TokenUsage,
     collect_token_usage,
 )
+from qwen_harness.memory import WorkingMemory
 from qwen_harness.orchestration import (
     ModelDecision,
     FinishDecision,
@@ -149,16 +150,32 @@ class Harness:
         if self.context_capacity <= 0:
             raise ValueError("context_capacity must be greater than zero")
 
-    def chat(self, prompt: str, *, contract: TaskContract | None = None) -> str:
+    def chat(
+        self,
+        prompt: str,
+        *,
+        contract: TaskContract | None = None,
+        memory: WorkingMemory | None = None,
+    ) -> str:
         """Return one assistant response for a non-empty user prompt."""
-        return self.run(prompt, contract=contract).output
+        return self.run(prompt, contract=contract, memory=memory).output
 
-    def run(self, prompt: str, *, contract: TaskContract | None = None) -> HarnessRun:
+    def run(
+        self,
+        prompt: str,
+        *,
+        contract: TaskContract | None = None,
+        memory: WorkingMemory | None = None,
+    ) -> HarnessRun:
         """Execute one prompt and return its structured result and trace."""
-        return asyncio.run(self._run(prompt, contract=contract))
+        return asyncio.run(self._run(prompt, contract=contract, memory=memory))
 
     async def _run(
-        self, prompt: str, *, contract: TaskContract | None = None
+        self,
+        prompt: str,
+        *,
+        contract: TaskContract | None = None,
+        memory: WorkingMemory | None = None,
     ) -> HarnessRun:
         """Run one turn under a Python-owned lifecycle and deadline."""
         from pydantic_ai.exceptions import UnexpectedModelBehavior
@@ -256,6 +273,20 @@ class Harness:
             "context.built",
             {"context_version": task_context.version},
         )
+        memory_history: tuple[Any, ...] = ()
+        memory_revision: int | None = None
+        if memory is not None:
+            memory_snapshot = memory.inspect()
+            memory_history = memory_snapshot.messages
+            memory_revision = memory_snapshot.revision
+            emit(
+                "memory.loaded",
+                {
+                    "turn_count": memory_snapshot.turn_count,
+                    "message_count": memory_snapshot.message_count,
+                    "serialized_bytes": memory_snapshot.serialized_bytes,
+                },
+            )
         transition(RunState.CALLING_MODEL)
         model_started = perf_counter()
         emit("model.call.started")
@@ -273,6 +304,8 @@ class Harness:
                 extra_body={"reasoning_effort": "none"},
             ),
         }
+        if memory_history:
+            run_arguments["message_history"] = memory_history
         run = self.agent.run(
             prompt,
             # Phase 1 has only one legal action. Let the small model generate
@@ -383,6 +416,30 @@ class Harness:
             {"elapsed_seconds": perf_counter() - verification_started},
         )
         transition(RunState.SUCCEEDED)
+        if memory is not None:
+            new_messages = getattr(result, "new_messages", None)
+            if callable(new_messages):
+                try:
+                    update = memory.remember(
+                        new_messages(),
+                        expected_revision=memory_revision,
+                    )
+                except Exception:
+                    emit(
+                        "memory.update.failed",
+                        {"error_category": "memory_serialization_error"},
+                    )
+                else:
+                    emit(
+                        "memory.updated",
+                        {
+                            "turn_count": update.turn_count,
+                            "message_count": update.message_count,
+                            "serialized_bytes": update.serialized_bytes,
+                            "evicted_turn_count": update.evicted_turns,
+                            "dropped_turn_count": update.dropped_turns,
+                        },
+                    )
         persist_metrics(RunState.SUCCEEDED)
         emit(
             "run.completed",
